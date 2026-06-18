@@ -1,7 +1,7 @@
 import type { LLMProvider, Message } from '../llm/index.js';
 import type { ToolRegistry, ToolContext } from '../tools/index.js';
 import { Memory, Budget } from '../memory/index.js';
-import type { AgentEvent, EventEmitter, Delegate } from './types.js';
+import type { AgentEvent, EventEmitter, Delegate, AbortSignal } from './types.js';
 import type { Skill } from '../skills/types.js';
 import { buildSkillInstructions } from './prompts.js';
 
@@ -20,29 +20,37 @@ export interface LoopDeps {
   onUpdatePlan?: (rawArgs: string) => string;
   /** Resolve a skill by name for use_skill (progressive disclosure). */
   resolveSkill?: (name: string) => Skill | undefined;
+  /** Abort signal: checked each iteration; if set, the loop stops gracefully. */
+  abortSignal?: AbortSignal;
 }
 
 export interface LoopResult {
   finalText: string;
-  stoppedReason: 'final' | 'budget';
+  stoppedReason: 'final' | 'budget' | 'aborted';
 }
 
 /**
  * 核心 think→tool→observe 循环：
  * 反复调用 LLM，执行其请求的工具，回填观察，直到模型不再调用工具或预算耗尽。
  * 内置反思自纠：工具失败时注入反思提示并允许有限次重试。
+ * 支持 AbortSignal 中断。
  */
 export async function runReasoningLoop(deps: LoopDeps): Promise<LoopResult> {
   const { provider, registry, memory, budget, toolCtx, emit, depth } = deps;
   let lastAssistant = '';
   let reflectUsed = 0;
   // 「改动后强制验证」闭环状态：
-  // pendingVerification 表示存在尚未验证的代码改动；verifyPrompted 记录已注入的验证提示次数。
   let pendingVerification = false;
   let verifyPrompted = 0;
   const maxVerifyPrompts = deps.maxReflectRetries;
 
   while (true) {
+    // 中断检查：每次循环开始检查
+    if (deps.abortSignal?.aborted) {
+      emit({ type: 'aborted', depth });
+      return { finalText: lastAssistant || '（任务已被用户中断）', stoppedReason: 'aborted' };
+    }
+
     if (!budget.consumeStep()) {
       emitBudget(deps);
       const reason = budget.tokensExhausted() ? 'token 预算' : '步数预算';
@@ -86,7 +94,7 @@ export async function runReasoningLoop(deps: LoopDeps): Promise<LoopResult> {
         continue;
       }
       // 改动后强制验证：若存在尚未验证的代码改动且仍有验证额度，则不立即返回，
-      // 而是要求模型运行构建/测试命令确认改动正确，形成验证闭环（避免死循环：受 maxVerifyPrompts 上限约束）。
+      // 而是要求模型运行构建/测试命令确认改动正确，形成验证闭环。
       if (pendingVerification && verifyPrompted < maxVerifyPrompts) {
         memory.add({ role: 'assistant', content: response.content });
         memory.add({
@@ -109,6 +117,12 @@ export async function runReasoningLoop(deps: LoopDeps): Promise<LoopResult> {
     // 否则下一轮发送时会因「tool_calls 未被完整响应」而报 400。
     const failures: string[] = [];
     for (const call of response.toolCalls) {
+      // 中断检查：每个 tool call 之前也检查一次
+      if (deps.abortSignal?.aborted) {
+        emit({ type: 'aborted', depth });
+        return { finalText: lastAssistant || '（任务已被用户中断）', stoppedReason: 'aborted' };
+      }
+
       // 子代理委派工具单独处理
       if (call.name === 'spawn_subagent' && deps.delegate) {
         const result = await handleSpawn(deps, call.id, call.arguments);
@@ -137,10 +151,7 @@ export async function runReasoningLoop(deps: LoopDeps): Promise<LoopResult> {
       // 始终为该 tool_call 补上 tool 消息，保证与 tool_calls 一一配对
       memory.add({ role: 'tool', name: call.name, toolCallId: call.id, content: toolResult.output });
 
-      // 「改动后强制验证」状态维护：
-      // - 成功写/改文件 => 存在尚未验证的代码改动
-      // - 成功执行命令（退出码 0）=> 视为验证通过，清除待验证标记
-      // - 命令执行失败时保持 pendingVerification 为 true，并经由下方 failures 触发反思修复
+      // 「改动后强制验证」状态维护
       if ((call.name === 'write_file' || call.name === 'edit_file') && toolResult.ok) {
         pendingVerification = true;
       } else if (call.name === 'run_command' && toolResult.ok) {

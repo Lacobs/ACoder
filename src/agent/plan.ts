@@ -1,13 +1,13 @@
 import { runReasoningLoop, seedTask, type LoopDeps, type LoopResult } from './loop.js';
 import { buildSystemPrompt, buildPlanRequest } from './prompts.js';
-import type { PlanStep } from './types.js';
+import type { PlanStep, AbortSignal } from './types.js';
 import type { EventEmitter } from './types.js';
 import type { Skill } from '../skills/types.js';
 import { Memory, createMemory } from '../memory/index.js';
 import type { CompressionConfig } from '../memory/index.js';
 import type { Message } from '../llm/index.js';
 
-export interface PlanRunOptions extends Omit<LoopDeps, 'emit' | 'depth' | 'maxReflectRetries' | 'resolveSkill'> {
+export interface PlanRunOptions extends Omit<LoopDeps, 'emit' | 'depth' | 'maxReflectRetries' | 'resolveSkill' | 'abortSignal'> {
   task: string;
   skills: Skill[];
   resolveSkill?: (name: string) => Skill | undefined;
@@ -15,6 +15,7 @@ export interface PlanRunOptions extends Omit<LoopDeps, 'emit' | 'depth' | 'maxRe
   contextLimit: number;
   compression: CompressionConfig;
   memoryPrompt?: string;
+  abortSignal?: AbortSignal;
 }
 
 interface PlanShape {
@@ -46,7 +47,6 @@ function parsePlan(content: string): string[] {
   } catch {
     /* fall through */
   }
-  // 兜底：按行解析
   return content
     .split('\n')
     .map((l) => l.replace(/^[\s\-*\d.)]+/, '').trim())
@@ -73,6 +73,13 @@ export async function runPlan(
   const stepSummaries: string[] = [];
 
   for (let i = 0; i < steps.length; i++) {
+    // 中断检查
+    if (opts.abortSignal?.aborted) {
+      emit({ type: 'plan_update', depth, steps: clone(steps), note: '任务已被用户中断。' });
+      emit({ type: 'aborted', depth });
+      return { finalText: stepSummaries.join('\n') || '（任务已被用户中断）', stoppedReason: 'aborted' };
+    }
+
     if (opts.budget.exhausted()) {
       emit({ type: 'plan_update', depth, steps: clone(steps), note: '预算耗尽，提前结束计划执行。' });
       break;
@@ -82,7 +89,6 @@ export async function runPlan(
     emit({ type: 'plan_update', depth, steps: clone(steps), note: `开始执行步骤 ${step.id}` });
 
     const stepMemory = createMemory(opts.provider, opts.compression);
-    // 复用会话事实
     for (const f of opts.memory.getFacts()) stepMemory.remember(f);
 
     const systemPrompt = buildSystemPrompt({
@@ -108,7 +114,14 @@ export async function runPlan(
       depth,
       maxReflectRetries: deps.maxReflectRetries,
       onUpdatePlan: (rawArgs) => applyPlanUpdate(steps, i, rawArgs, emit, depth),
+      abortSignal: opts.abortSignal,
     });
+
+    if (result.stoppedReason === 'aborted') {
+      step.status = 'failed';
+      emit({ type: 'plan_update', depth, steps: clone(steps), note: '步骤因中断而停止。' });
+      return { finalText: stepSummaries.join('\n') || '（任务已被用户中断）', stoppedReason: 'aborted' };
+    }
 
     step.status = result.stoppedReason === 'budget' ? 'failed' : 'done';
     stepSummaries.push(`步骤${step.id}「${step.title}」结果：${clip(result.finalText)}`);
@@ -116,7 +129,6 @@ export async function runPlan(
     emit({ type: 'plan_update', depth, steps: clone(steps) });
   }
 
-  // 汇总
   const summaryMemory = new Memory({ contextLimit: opts.contextLimit });
   summaryMemory.add({ role: 'system', content: '请把多步执行的结果汇总为简洁的最终答复。' });
   summaryMemory.add({
@@ -167,10 +179,6 @@ function clip(s: string): string {
   return t.length > 160 ? t.slice(0, 160) + '…' : t;
 }
 
-/**
- * 应用模型对剩余步骤的修正：支持 add（追加步骤）与 replace（替换某步骤标题）。
- * 仅允许修改当前步骤之后的内容，避免破坏已完成步骤。
- */
 function applyPlanUpdate(
   steps: PlanStep[],
   currentIndex: number,

@@ -22,7 +22,8 @@ export type AgentEvent =
   | { type: 'subagent_start'; depth: number; task: string; tools: string[] }
   | { type: 'subagent_end'; depth: number; ok: boolean; summary: string }
   | { type: 'final'; depth: number; text: string }
-  | { type: 'budget'; depth: number; steps: number; maxSteps: number; approxTokens: number };
+  | { type: 'budget'; depth: number; steps: number; maxSteps: number; approxTokens: number }
+  | { type: 'aborted'; depth: number };
 
 export type EventEmitter = (event: AgentEvent) => void;
 
@@ -38,3 +39,16 @@ export interface SubAgentResult {
 
 /** 委派子代理执行子任务的函数签名（由 orchestrator 提供）。 */
 export type Delegate = (spec: SubAgentSpec, parentDepth: number) => Promise<SubAgentResult>;
+
+/** 中断信号：代理、子代理循环中定期检查，若已设置则尽快停止。 */
+export interface AbortSignal {
+  readonly aborted: boolean;
+}
+
+export function createAbortSignal(): { signal: AbortSignal; abort: () => void } {
+  let aborted = false;
+  return {
+    signal: { get aborted() { return aborted; } },
+    abort: () => { aborted = true; },
+  };
+}

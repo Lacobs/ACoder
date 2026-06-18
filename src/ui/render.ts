@@ -18,9 +18,46 @@ function statusIcon(status: PlanStep['status']): string {
   }
 }
 
+/** 对工具结果中的 diff 预览行做语法高亮。 */
+function highlightDiff(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => {
+      if (line.startsWith('+')) return chalk.green(line);
+      if (line.startsWith('-')) return chalk.red(line);
+      if (line.startsWith('@@')) return chalk.cyan(line);
+      return line;
+    })
+    .join('\n');
+}
+
+/** 判断是否应高亮为 diff（变更预览/摘要）。 */
+function isDiffBlock(text: string): boolean {
+  return text.includes('--- 变更预览 ---') || text.includes('--- 变更摘要 ---');
+}
+
+function renderToolOutput(text: string): string {
+  const lines = text.split('\n');
+  let inDiff = false;
+  return lines
+    .map((l) => {
+      if (l.includes('--- 变更预览 ---') || l.includes('--- 变更摘要 ---')) {
+        inDiff = true;
+        return chalk.cyan(l);
+      }
+      if (inDiff) {
+        if (l.startsWith('+')) return chalk.green(l);
+        if (l.startsWith('-')) return chalk.red(l);
+        if (l.trim() === '') { inDiff = false; return ''; }
+        return chalk.dim(l);
+      }
+      return chalk.dim(l);
+    })
+    .join('\n');
+}
+
 /**
  * 创建一个有状态的渲染器，把 AgentEvent 流式渲染到终端。
- * 思考增量通过 thinking_delta 实时打印。
  */
 export function createRenderer() {
   let thinkingActive = false;
@@ -75,10 +112,7 @@ export function createRenderer() {
 
       case 'tool_result': {
         const tag = e.ok ? chalk.green('✓ 结果') : chalk.red('✗ 错误');
-        const body = e.output
-          .split('\n')
-          .map((l) => `${pad}    ${chalk.dim(l)}`)
-          .join('\n');
+        const body = renderToolOutput(e.output);
         process.stdout.write(`${pad}  ${tag} [${e.name}]\n${body}\n`);
         break;
       }
@@ -129,6 +163,10 @@ export function createRenderer() {
         process.stdout.write(
           `${pad}${chalk.dim(`⏱  预算: ${e.steps}/${e.maxSteps} 步, ~${e.approxTokens} tokens`)}\n`,
         );
+        break;
+
+      case 'aborted':
+        process.stdout.write(`${pad}${chalk.yellow('⏸  任务已中断')}\n`);
         break;
     }
   };
