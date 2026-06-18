@@ -1,0 +1,35 @@
+{
+  "name": "acoder",
+  "version": "0.1.0",
+  "description": "ACoder — a Claude-Code-style CLI Coding Agent with tools, skills, ReAct/Plan modes and sub-agent orchestration.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "mca": "dist/cli.js"
+  },
+  "scripts": {
+    "dev": "tsx src/cli.ts",
+    "build": "tsc -p tsconfig.json && chmod +x dist/cli.js",
+    "start": "node dist/cli.js",
+    "link": "npm run build && npm link",
+    "unlink": "npm unlink -g acoder",
+    "test": "tsx src/test/compression.test.ts && tsx src/test/skills.test.ts && tsx src/test/memory-context.test.ts && tsx src/test/file-tools.test.ts && tsx src/test/analyze-code.test.ts",
+    "demo:react": "WORKDIR=demo-workspace tsx src/cli.ts --once \"读取 README.md 并总结其要点\"",
+    "demo:plan": "WORKDIR=demo-workspace tsx src/cli.ts --mode plan --once \"在 demo-workspace 下新增一个 hello.txt 文件并写入问候语，然后列出目录确认\"",
+    "demo:subagent": "WORKDIR=demo-workspace tsx src/cli.ts --once \"调研项目结构并审查代码质量，拆分为多个子任务并行处理\""
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "chalk": "^5.3.0",
+    "dotenv": "^16.4.5",
+    "openai": "^4.67.3",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.4"
+  }
+}

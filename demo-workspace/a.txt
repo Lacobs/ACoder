@@ -1,0 +1,2 @@
+你好，欢迎使用 Mini Coding Agent！
+Hello from the mock agent.
